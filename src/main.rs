@@ -15,14 +15,15 @@ use solana_sdk::{
     instruction::{Instruction, AccountMeta},
     compute_budget,
     system_instruction,
-   
+    address_lookup_table_account::AddressLookupTableAccount
     //hash::Hash,
     //signer::keypair::Keypair,
 };
-use solana_program::address;
+//use solana_program::address_lookup_table::AddressLookupTableAccount;
 
+use borsh::{BorshDeserialize,BorshSerialize};
 use base64::{engine::general_purpose, Engine as _};
-use bs58::{self, decode::Error as Bs58Error};
+use bs58::{self};
 use serde_json::{json, Value};
 
 const QUOTE_URL: &str = "https://api.jup.ag/swap/v1/quote";
@@ -216,7 +217,7 @@ async fn build_transaction(
     let message = MessageV0::try_compile(
         &payer.pubkey(),
         &ixs,
-        alt_accounts,
+        &alt_accounts,
         blockhash,
     )?;
 
@@ -229,6 +230,12 @@ async fn build_transaction(
     Ok(transaction)
 }
 
+#[derive(BorshSerialize, BorshDeserialize)]
+struct RawAddressLookupTable {
+    addresses: Vec<Pubkey>,
+    key: Pubkey,
+    version: u8,
+}
 async fn get_address_lookup_tables(
     client: &RpcClient,
     addresses: Vec<String>,
@@ -239,24 +246,31 @@ async fn get_address_lookup_tables(
         let pubkey = Pubkey::from_str(&addr)?;
         let account = client.get_account(&pubkey)?;
         
-        let lookup_table = bincode::deserialize::<AddressLookupTableAccount>(&account.data)?;
-        alt_accounts.push(lookup_table);
+         // 关键修复点：跳过 8 字节头
+         let data_slice = &account.data[8..];  
+         let raw_table = RawAddressLookupTable::try_from_slice(data_slice)?;
+         
+         alt_accounts.push(AddressLookupTableAccount {
+             key: raw_table.key,
+             addresses: raw_table.addresses,
+             
+         });
     }
     
     Ok(alt_accounts)
 }
 
-fn convert_jupiter_instruction(jupiter_ix: JupiterInstruction) -> Result<Instruction, Bs58Error> {
-    let program_id = Pubkey::from_str(&jupiter_ix.program_id);
+fn convert_jupiter_instruction(jupiter_ix: JupiterInstruction) -> Result<Instruction, Box<dyn std::error::Error>> {
+    let program_id = Pubkey::from_str(&jupiter_ix.program_id)?;
     let accounts = jupiter_ix.accounts.into_iter().map(|meta| {
-        AccountMeta {
-            pubkey: Pubkey::from_str(&meta.pubkey).unwrap(),
+        Ok(AccountMeta {
+            pubkey: Pubkey::from_str(&meta.pubkey)?,
             is_signer: meta.is_signer,
             is_writable: meta.is_writable,
-        }
-    }).collect();
+        })
+    }).collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
     
-    let data = general_purpose::STANDARD.decode(&jupiter_ix.data);
+    let data = general_purpose::STANDARD.decode(&jupiter_ix.data)?;
     
     Ok(Instruction {
         program_id,
