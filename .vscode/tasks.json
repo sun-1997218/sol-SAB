@@ -1,0 +1,15 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+	  {
+		"label": "build",       // 任务名称
+		"type": "shell",
+		"command": "cargo",     // 使用 cargo 命令
+		"args": ["build"],      // 编译参数
+		"group": {
+		  "kind": "build",
+		  "isDefault": true     // 设为默认构建任务
+		}
+	  }
+	]
+  }

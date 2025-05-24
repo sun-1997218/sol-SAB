@@ -1,0 +1,14 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Rust",
+            "type": "lldb",
+            "request": "launch",
+            "preLaunchTask": "build",
+            "program": "${workspaceFolder}/target/debug/world_hello", // 关键路径
+            "args": [],
+            "cwd": "${workspaceFolder}",
+        }
+    ]
+}
