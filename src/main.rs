@@ -1,31 +1,26 @@
-#![allow(unused_variables)]
-type File = String;
-
-fn open(f: &mut File) -> bool {
-    true
+trait IpAddr{
+    fn display(&self);
 }
-fn close(f: &mut File) -> bool {
-    true
+struct V4(String);
+impl IpAddr for V4 {
+    fn display(&self) {
+        println!("ipv4:{:?}",self.0)
+    }
 }
-
-#[allow(dead_code)]
-fn read(f: &mut File, save_to: &mut Vec<u8>) -> ! {
-    unimplemented!()
-}
-
-fn greet_world() {
-    let southern_germany = "Grüß Gott!";
-    let chinese = "世界，你好";
-    let english = "World, hello";
-    let regions = [southern_germany, chinese, english];
-    for region in regions.iter() {
-        println!("{}", &region);
+struct V6(String);
+impl IpAddr for V6 {
+    fn display(&self) {
+        println!("ipv6: {:?}",self.0)
     }
 }
 
 fn main() {
-    let mut f1 = File::from("f1.txt");
-    open(&mut f1);
-    //read(&mut f1, &mut vec![]);
-    close(&mut f1);
+    let v: Vec<Box<dyn IpAddr>> = vec![
+        Box::new(V4("127.0.0.1".to_string())),
+        Box::new(V6("::1".to_string())),
+    ];
+
+    for ip in v {
+        ip.display();
+    }
 }
