@@ -1,305 +1,228 @@
-use std::{env, str::FromStr, sync::Arc};
-use dotenv::dotenv;
-use reqwest::Client as HttpClient;
-use serde::{Deserialize, Serialize};
-use solana_client::{
-    rpc_client::RpcClient
-    //rpc_config::RpcSendTransactionConfig,
-    //rpc_response::RpcResult,
-};
-use solana_sdk::{
-    pubkey::Pubkey,
-    signature::{Keypair, Signer, Signature},
-    transaction::VersionedTransaction,
-    message::{v0::Message as MessageV0, VersionedMessage},
-    instruction::{Instruction, AccountMeta},
-    compute_budget,
-    system_instruction,
-    address_lookup_table_account::AddressLookupTableAccount
-    //hash::Hash,
-    //signer::keypair::Keypair,
-};
-//use solana_program::address_lookup_table::AddressLookupTableAccount;
-
-use borsh::{BorshDeserialize,BorshSerialize};
-use base64::{engine::general_purpose, Engine as _};
-use bs58::{self};
+use std::{env, time::{SystemTime, UNIX_EPOCH},str::FromStr};
+use base64::Engine;
+use bs58;
+use reqwest::Client;
 use serde_json::{json, Value};
-
-const QUOTE_URL: &str = "https://api.jup.ag/swap/v1/quote";
-const SWAP_URL: &str = "https://lite-api.jup.ag/swap/v1/swap-instructions";
-const JITO_TIP_ACCOUNT: &str = "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5";
-const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
-const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-
-#[derive(Debug, Serialize, Deserialize)]
-struct JupiterQuote {
-    input_mint: String,
-    output_mint: String,
-    in_amount: u64,
-    out_amount: u64,
-    route_plan: Vec<RouteStep>,
-    context_slot: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct RouteStep {
-    swap_info: SwapInfo,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct SwapInfo {
-    amm_key: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct SwapInstructions {
-    compute_unit_limit: u32,
-    setup_instructions: Vec<JupiterInstruction>,
-    swap_instruction: JupiterInstruction,
-    cleanup_instruction: Option<JupiterInstruction>,
-    address_lookup_table_addresses: Vec<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct JupiterInstruction {
-    program_id: String,
-    accounts: Vec<AccountMetaData>,
-    data: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct AccountMetaData {
-    pubkey: String,
-    is_signer: bool,
-    is_writable: bool,
-}
+use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_sdk::{
+    
+    commitment_config::CommitmentConfig,
+    compute_budget::ComputeBudgetInstruction,
+    instruction::{AccountMeta, Instruction},
+    message::{v0, VersionedMessage},
+    pubkey::Pubkey,
+    signature::{Keypair, Signer},
+    system_instruction::transfer,
+    transaction:: VersionedTransaction,
+};
+use tokio::time::{sleep, Duration};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    dotenv().ok();
-    let payer = Keypair::from_base58_string(&env::var("SECRET_KEY")?);
-    let rpc_url = "https://mainnet.helius-rpc.com/?api-key=77a3d694-a103-48d1-9c07-fa80651d5390";
-    let client = Arc::new(RpcClient::new(rpc_url));
+    dotenv::dotenv().ok();
+    let secret_key = env::var("SECRET_KEY")?;
+    let payer = Keypair::from_base58_string(&secret_key);
+    println!("payer: {}", payer.pubkey());
+
+    let connection = RpcClient::new_with_commitment(
+        "https://mainnet.helius-rpc.com/?api-key=77a3d694-a103-48d1-9c07-fa80651d5390".to_string(),
+        CommitmentConfig::processed(),
+    );
+
+    let quote_url = "https://api.jup.ag/swap/v1/quote";
+    let swap_instruction_url = "https://lite-api.jup.ag/swap/v1/swap-instructions";
+
+    let w_sol_mint = "So11111111111111111111111111111111111111112";
+    let usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
     loop {
-        match run(client.clone(), &payer).await {
-            Ok(_) => {}
-            Err(e) => eprintln!("Error: {:?}", e),
+        run(&connection, &payer, quote_url, swap_instruction_url, w_sol_mint, usdc_mint).await?;
+        sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn get_program_id(connection: &RpcClient, mint_address: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let pubkey = Pubkey::from_str(mint_address)?;
+    let account = connection.get_account(&pubkey).await?;
+    Ok(account.owner.to_string())
+}
+
+fn instruction_format(instruction: &Value) -> Instruction {
+    let program_id = Pubkey::from_str(instruction["programId"].as_str().unwrap()).unwrap();
+    let accounts = instruction["accounts"].as_array().unwrap().iter().map(|acc| {
+        AccountMeta {
+            pubkey: Pubkey::from_str(acc["pubkey"].as_str().unwrap()).unwrap(),
+            is_signer: acc["isSigner"].as_bool().unwrap(),
+            is_writable: acc["isWritable"].as_bool().unwrap(),
         }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
-}
-
-async fn run(client: Arc<RpcClient>, payer: &Keypair) -> Result<(), Box<dyn std::error::Error>> {
-    // 获取报价
-    let (merged_quote, diff) = get_merged_quote().await?;
-    if diff <= 1000 {
-        return Ok(());
-    }
-
-    // 获取交换指令
-    let swap_instructions = get_swap_instructions(&merged_quote, payer.pubkey()).await?;
+    }).collect();
     
-    // 构建交易
-    let transaction = build_transaction(&client, payer, swap_instructions).await?;
+    let data = base64::engine::general_purpose::STANDARD.decode(instruction["data"].as_str().unwrap()).unwrap();
     
-    // 发送交易
-    send_transaction(transaction).await?;
-    
-    Ok(())
-}
-
-async fn get_merged_quote() -> Result<(Value, i64), Box<dyn std::error::Error>> {
-    let http = HttpClient::new();
-    
-    // 第一次报价 WSOL → USDC
-    let quote0: JupiterQuote = http.get(QUOTE_URL)
-        .query(&[
-            ("inputMint", WSOL_MINT),
-            ("outputMint", USDC_MINT),
-            ("amount", "1000000"),
-            ("slippageBps", "100")
-        ])
-        .send().await?
-        .json().await?;
-
-    // 第二次报价 USDC → WSOL
-    let quote1: JupiterQuote = http.get(QUOTE_URL)
-        .query(&[
-            ("inputMint", USDC_MINT),
-            ("outputMint", WSOL_MINT),
-            ("amount", &quote0.out_amount.to_string()),
-            ("slippageBps", "20")
-        ])
-        .send().await?
-        .json().await?;
-
-    // 计算套利空间
-    let diff = quote1.out_amount as i64 - 1000000;
-    if diff <= 1000 {
-        return Ok((json!({}), diff));
-    }
-
-    // 合并报价结果
-    let merged_quote = json!({
-        "inputMint": WSOL_MINT,
-        "outputMint": USDC_MINT,
-        "inAmount": 1000000,
-        "outAmount": quote0.out_amount + 1000,
-        "contextSlot": quote0.context_slot,
-        "routePlan": quote0.route_plan,
-        "prioritizationFeeLamports": {
-            "priorityLevelWithMaxLamports": {
-                "maxLamports": 10000000,
-                "priorityLevel": "veryHigh"
-            }
-        }
-    });
-
-    Ok((merged_quote, diff))
-}
-
-async fn get_swap_instructions(quote: &Value, payer: Pubkey) -> Result<SwapInstructions, Box<dyn std::error::Error>> {
-    let http = HttpClient::new();
-    
-    let swap_data = json!({
-        "userPublicKey": payer.to_string(),
-        "quoteResponse": quote,
-        "wrapAndUnwrapSol": true,
-        "dynamicComputeUnitLimit": true,
-    });
-
-    let instructions: SwapInstructions = http.post(SWAP_URL)
-        .json(&swap_data)
-        .send().await?
-        .json().await?;
-
-    Ok(instructions)
-}
-
-async fn build_transaction(
-    client: &RpcClient,
-    payer: &Keypair,
-    instructions: SwapInstructions,
-) -> Result<VersionedTransaction, Box<dyn std::error::Error>> {
-    // 转换指令
-    let mut ixs = vec![
-        compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(instructions.compute_unit_limit),
-    ];
-
-    // 添加设置指令
-    for setup in instructions.setup_instructions {
-        ixs.push(convert_jupiter_instruction(setup)?);
-    }
-
-    // 添加交换指令
-    ixs.push(convert_jupiter_instruction(instructions.swap_instruction)?);
-
-    // 添加清理指令
-    if let Some(cleanup) = instructions.cleanup_instruction {
-        ixs.push(convert_jupiter_instruction(cleanup)?);
-    }
-
-    // 添加Jito小费
-    let tip_ix = system_instruction::transfer(
-        &payer.pubkey(),
-        &Pubkey::from_str(JITO_TIP_ACCOUNT)?,
-        1000,
-    );
-    ixs.push(tip_ix);
-
-    // 获取地址查找表
-    let alt_accounts:Vec<AddressLookupTableAccount> = get_address_lookup_tables(client, instructions.address_lookup_table_addresses).await?;
-
-    // 构建版本化消息
-    let blockhash = client.get_latest_blockhash()?;
-    let message = MessageV0::try_compile(
-        &payer.pubkey(),
-        &ixs,
-        &alt_accounts,
-        blockhash,
-    )?;
-
-    // 签名交易
-    let transaction = VersionedTransaction::try_new(
-        VersionedMessage::V0(message),
-        &[payer]
-    )?;
-
-    Ok(transaction)
-}
-
-#[derive(BorshSerialize, BorshDeserialize)]
-struct RawAddressLookupTable {
-    addresses: Vec<Pubkey>,
-    key: Pubkey,
-    version: u8,
-}
-async fn get_address_lookup_tables(
-    client: &RpcClient,
-    addresses: Vec<String>,
-) -> Result<Vec<AddressLookupTableAccount>, Box<dyn std::error::Error>> {
-    let mut alt_accounts = Vec::new();
-    
-    for addr in addresses {
-        let pubkey = Pubkey::from_str(&addr)?;
-        let account = client.get_account(&pubkey)?;
-        
-         // 关键修复点：跳过 8 字节头
-         let data_slice = &account.data[8..];  
-         let raw_table = RawAddressLookupTable::try_from_slice(data_slice)?;
-         
-         alt_accounts.push(AddressLookupTableAccount {
-             key: raw_table.key,
-             addresses: raw_table.addresses,
-             
-         });
-    }
-    
-    Ok(alt_accounts)
-}
-
-fn convert_jupiter_instruction(jupiter_ix: JupiterInstruction) -> Result<Instruction, Box<dyn std::error::Error>> {
-    let program_id = Pubkey::from_str(&jupiter_ix.program_id)?;
-    let accounts = jupiter_ix.accounts.into_iter().map(|meta| {
-        Ok(AccountMeta {
-            pubkey: Pubkey::from_str(&meta.pubkey)?,
-            is_signer: meta.is_signer,
-            is_writable: meta.is_writable,
-        })
-    }).collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
-    
-    let data = general_purpose::STANDARD.decode(&jupiter_ix.data)?;
-    
-    Ok(Instruction {
+    Instruction {
         program_id,
         accounts,
         data,
-    })
+    }
 }
 
-async fn send_transaction(tx: VersionedTransaction) -> Result<Signature, Box<dyn std::error::Error>> {
-    let http = HttpClient::new();
-    
-    // 序列化交易
-    let serialized = bincode::serialize(&tx)?;
-    let b58_tx = bs58::encode(serialized).into_string();
+async fn fetch_alt_accounts(connection: &RpcClient, keys: &[String]) -> Result<Vec<solana_sdk::address_lookup_table::AddressLookupTableAccount>, Box<dyn std::error::Error>> {
+    let mut alt_accounts = Vec::new();
+    for key in keys {
+        let account = connection.get_account(&Pubkey::from_str(key)?).await?;
+        let addresses: Vec<Pubkey> = serde_json::from_slice::<Value>(&account.data)?
+            .get("info")
+            .and_then(|v| v.get("addresses"))
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| Pubkey::from_str(s).unwrap())
+            .collect();
+        alt_accounts.push(solana_sdk::address_lookup_table::AddressLookupTableAccount {
+            key: Pubkey::from_str(key)?,
+            addresses,
+        });
+    }
+    Ok(alt_accounts)
+}
 
-    // 发送到Jito
-    let response: Value = http.post("https://mainnet.block-engine.jito.wtf/api/v1/transactions")
-        .json(&json!({
+async fn run(
+    connection: &RpcClient,
+    payer: &Keypair,
+    quote_url: &str,
+    swap_instruction_url: &str,
+    w_sol_mint: &str,
+    usdc_mint: &str
+) -> Result<(), Box<dyn std::error::Error>> {
+    let start = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+
+    // Quote0: WSOL -> USDC
+    let quote0_params = json!({
+        "inputMint": w_sol_mint,
+        "outputMint": usdc_mint,
+        "amount": 1000000,
+        "onlyDirectRoutes": false,
+        "slippageBps": 100,
+        "maxAccounts": 20
+    });
+
+    let quote0_resp: Value = Client::new()
+        .get(quote_url)
+        .query(&quote0_params)
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    // Quote1: USDC -> WSOL
+    let quote1_params = json!({
+        "inputMint": usdc_mint,
+        "outputMint": w_sol_mint,
+        "amount": quote0_resp["outAmount"],
+        "onlyDirectRoutes": false,
+        "slippageBps": 20,
+        "maxAccounts": 20
+    });
+
+    let quote1_resp: Value = Client::new()
+        .get(quote_url)
+        .query(&quote1_params)
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    let diff_lamports = quote1_resp["outAmount"].as_u64().unwrap() - 1000000;
+    println!("diff_lamports: {}", diff_lamports);
+
+    if diff_lamports > 1000 {
+        let mut merged_quote = quote0_resp.clone();
+        merged_quote["outputMint"] = json!(usdc_mint);
+        merged_quote["outAmount"] = json!(quote0_resp["outAmount"].as_u64().unwrap() + 1000);
+        merged_quote["priceImpactPct"] = json!("0");
+
+        let swap_data = json!({
+            "userPublicKey": payer.pubkey().to_string(),
+            "quoteResponse": merged_quote,
+            "wrapAndUnwrapSol": true,
+            "onlyDirectRoutes": true,
+            "useSharedAccounts": false,
+            "computeUnitPriceMicroLamports": 5000,
+            "dynamicComputeUnitLimit": true,
+            "skipUserAccountsRpcCalls": true,
+            "dynamicSlippage": true,
+            "skipInitializeImmutableOwner": true
+        });
+
+        let instructions_resp: Value = Client::new()
+            .post(swap_instruction_url)
+            .json(&swap_data)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        let mut ixs = vec![
+            ComputeBudgetInstruction::set_compute_unit_limit(instructions_resp["computeUnitLimit"].as_u64().unwrap() as u32)
+        ];
+
+        // Setup instructions
+        for instr in instructions_resp["setupInstructions"].as_array().unwrap() {
+            ixs.push(instruction_format(instr));
+        }
+
+        // Swap instruction
+        ixs.push(instruction_format(&instructions_resp["swapInstruction"]));
+
+        // Cleanup instruction
+        if let Some(cleanup) = instructions_resp.get("cleanupInstruction") {
+            ixs.push(instruction_format(cleanup));
+        }
+
+        // Jito tip
+        let tip_ix = transfer(
+            &payer.pubkey(),
+            &Pubkey::from_str("96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5")?,
+            1000
+        );
+        ixs.push(tip_ix);
+
+        // Build transaction
+        let blockhash = connection.get_latest_blockhash().await?;
+        let message = VersionedMessage::V0(v0::Message::try_compile(
+            &payer.pubkey(),
+            &ixs,
+            &[],
+            blockhash
+        )?);
+
+        let transaction = VersionedTransaction::try_new(
+            message,
+            &[payer]
+        )?;
+
+        // Serialize and send
+        let serialized = bincode::serialize(&transaction)?;
+        let base58_tx = bs58::encode(serialized).into_string();
+
+        let bundle = json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendTransaction",
-            "params": [b58_tx]
-        }))
-        .send().await?
-        .json().await?;
+            "params": [base58_tx]
+        });
 
-    let sig_str = response["result"].as_str().ok_or("No signature in response")?;
-    let signature = Signature::from_str(sig_str)?;
-    
-    println!("Transaction sent: {}", signature);
-    Ok(signature)
+        let response: Value = Client::new()
+            .post("https://mainnet.block-engine.jito.wtf/api/v1/transactions")
+            .json(&bundle)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        println!("Bundle ID: {}", response["result"]);
+    }
+
+    Ok(())
 }
