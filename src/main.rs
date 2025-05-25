@@ -15,8 +15,10 @@ use solana_sdk::{
     system_instruction::transfer,
     transaction:: VersionedTransaction,
 };
+mod models;
+use models::quote::QuoteResp;
 use tokio::time::{sleep, Duration};
-
+//se serde_json::to_string_pretty;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv::dotenv().ok();
@@ -107,7 +109,7 @@ async fn run(
         "maxAccounts": 20
     });
 
-    let quote0_resp: Value = Client::new()
+    let quote0_resp: QuoteResp = Client::new()
         .get(quote_url)
         .query(&quote0_params)
         .send()
@@ -115,32 +117,42 @@ async fn run(
         .json()
         .await?;
 
+    // 调试打印（显示完整结构但格式不友好）
+
+
     // Quote1: USDC -> WSOL
     let quote1_params = json!({
         "inputMint": usdc_mint,
         "outputMint": w_sol_mint,
-        "amount": quote0_resp["outAmount"],
+        "amount": quote0_resp.outAmount,
         "onlyDirectRoutes": false,
         "slippageBps": 20,
         "maxAccounts": 20
     });
 
-    let quote1_resp: Value = Client::new()
+ 
+
+    let quote1_resp: QuoteResp = Client::new()
         .get(quote_url)
         .query(&quote1_params)
         .send()
         .await?
         .json()
         .await?;
+    
 
-    let diff_lamports = quote1_resp["outAmount"].as_u64().unwrap() - 1000000;
+
+    let out_amount_str = quote1_resp.outAmount.as_str(); // 先转字符串
+    let out_amount = out_amount_str.parse::<u64>().expect("无法转换为u64");
+    let diff_lamports = out_amount.saturating_sub(1000000); // 避免下溢
     println!("diff_lamports: {}", diff_lamports);
 
     if diff_lamports > 1000 {
         let mut merged_quote = quote0_resp.clone();
-        merged_quote["outputMint"] = json!(usdc_mint);
-        merged_quote["outAmount"] = json!(quote0_resp["outAmount"].as_u64().unwrap() + 1000);
-        merged_quote["priceImpactPct"] = json!("0");
+        merged_quote.outputMint = usdc_mint.to_string();
+        let out_amount1 = quote0_resp.outAmount.parse::<u64>().unwrap();
+        merged_quote.outAmount = out_amount1.saturating_add(1000).to_string();
+        merged_quote.priceImpactPct = "0".to_string();
 
         let swap_data = json!({
             "userPublicKey": payer.pubkey().to_string(),
