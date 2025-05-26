@@ -44,3 +44,13 @@ pub struct SwapInfo {
     pub outAmount: String,
     pub outputMint: String,
 }
+
+#[derive(Debug,Serialize,Deserialize,Clone)]
+pub struct Quote_param <'a>{
+    pub inputMint:String,
+    pub outputMint:String,
+    pub amount:&'a str,
+    pub onlyDirectRoutes:bool,
+    pub slippageBps: u8,
+    pub maxAccounts: u8
+}

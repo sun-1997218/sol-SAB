@@ -16,7 +16,7 @@ use solana_sdk::{
     transaction:: VersionedTransaction,
 };
 mod models;
-use models::quote::QuoteResp;
+use models::quote::{QuoteResp, Quote_param};
 use tokio::time::{sleep, Duration};
 //se serde_json::to_string_pretty;
 #[tokio::main]
@@ -100,14 +100,14 @@ async fn run(
     let start = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
 
     // Quote0: WSOL -> USDC
-    let quote0_params = json!({
-        "inputMint": w_sol_mint,
-        "outputMint": usdc_mint,
-        "amount": 1000000,
-        "onlyDirectRoutes": false,
-        "slippageBps": 100,
-        "maxAccounts": 20
-    });
+    let quote0_params:Quote_param =  Quote_param{
+        inputMint : w_sol_mint.to_string(),
+        outputMint:usdc_mint.to_string(),
+        amount:"1000000",
+        onlyDirectRoutes:false,
+        slippageBps:100,
+        maxAccounts:20
+    };
 
     let quote0_resp: QuoteResp = Client::new()
         .get(quote_url)
@@ -119,17 +119,16 @@ async fn run(
 
     // 调试打印（显示完整结构但格式不友好）
 
-
+    
     // Quote1: USDC -> WSOL
-    let quote1_params = json!({
-        "inputMint": usdc_mint,
-        "outputMint": w_sol_mint,
-        "amount": quote0_resp.outAmount,
-        "onlyDirectRoutes": false,
-        "slippageBps": 20,
-        "maxAccounts": 20
-    });
-
+    let quote1_params :Quote_param=Quote_param{
+        inputMint : usdc_mint.to_string(),
+        outputMint:w_sol_mint.to_string(),
+        amount:&quote0_resp.outAmount,
+        onlyDirectRoutes:false,
+        slippageBps:20,
+        maxAccounts:20
+    };
  
 
     let quote1_resp: QuoteResp = Client::new()
@@ -147,10 +146,13 @@ async fn run(
     let diff_lamports = out_amount.saturating_sub(1000000); // 避免下溢
     println!("diff_lamports: {}", diff_lamports);
 
-    if diff_lamports > 0 {
+    if diff_lamports > 300 {
         let mut merged_quote = quote0_resp.clone();
         merged_quote.outputMint = usdc_mint.to_string();
-        let out_amount1 = quote0_resp.outAmount.parse::<u64>().unwrap();
+        // 确保在解析前未移动所有权
+        let out_amount_str = &quote0_resp.outAmount; // 显式借用
+        let out_amount1: u64 = out_amount_str.parse()
+    .expect("Failed to parse outAmount to u64");
         merged_quote.outAmount = out_amount1.saturating_add(1000).to_string();
         merged_quote.priceImpactPct = "0".to_string();
 
