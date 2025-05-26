@@ -1,1 +1,1 @@
-an SAB in RUST
+SAB in RUST
