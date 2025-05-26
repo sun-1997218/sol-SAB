@@ -147,7 +147,7 @@ async fn run(
     let diff_lamports = out_amount.saturating_sub(1000000); // 避免下溢
     println!("diff_lamports: {}", diff_lamports);
 
-    if diff_lamports > 1000 {
+    if diff_lamports > 0 {
         let mut merged_quote = quote0_resp.clone();
         merged_quote.outputMint = usdc_mint.to_string();
         let out_amount1 = quote0_resp.outAmount.parse::<u64>().unwrap();
@@ -174,6 +174,8 @@ async fn run(
             .await?
             .json()
             .await?;
+
+        println!("{:#?}",instructions_resp);
 
         let mut ixs = vec![
             ComputeBudgetInstruction::set_compute_unit_limit(instructions_resp["computeUnitLimit"].as_u64().unwrap() as u32)
